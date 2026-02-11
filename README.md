@@ -23,10 +23,7 @@ This repository contains the example inference script for the MEMO-preview model
 ## Installation
 
 ```bash
-conda create -n memo python=3.10 -y
-conda activate memo
-conda install -c conda-forge ffmpeg -y
-pip install -e .
+uv sync
 ```
 
 > Our code will download the checkpoint from Hugging Face automatically, and the models for face analysis and vocal separation will be downloaded to `misc_model_dir` of `configs/inference.yaml`. If you want to download the models manually, please download the checkpoint from [here](https://huggingface.co/memoavatar/memo) and specify the path in `model_name_or_path` of `configs/inference.yaml`.
@@ -34,13 +31,13 @@ pip install -e .
 ## Inference
 
 ```bash
-python inference.py --config configs/inference.yaml --input_image <IMAGE_PATH> --input_audio <AUDIO_PATH> --output_dir <SAVE_PATH>
+uv run inference.py --config configs/inference.yaml --input_image <IMAGE_PATH> --input_audio <AUDIO_PATH> --output_dir <SAVE_PATH>
 ```
 
 For example:
 
 ```bash
-python inference.py --config configs/inference.yaml --input_image assets/examples/dicaprio.jpg --input_audio assets/examples/speech.wav --output_dir outputs
+uv run inference.py --config configs/inference.yaml --input_image assets/examples/dicaprio.jpg --input_audio assets/examples/speech.wav --output_dir outputs
 ```
 
 > We tested the code on H100 and RTX 4090 GPUs using CUDA 12. Under the default settings (fps=30, inference_steps=20), the inference time is around 1 second per frame on H100 and 2 seconds per frame on RTX 4090. We welcome community contributions to improve the inference speed or add more features.
@@ -54,7 +51,7 @@ We provide a straightforward finetuning script for users to continue training on
 Install the dependencies for data preprocessing and finetuning:
 
 ```bash
-pip install deepspeed decord wandb
+uv sync --group finetune
 ```
 
 Your training data should be in the form of video clips. The data should be organized as follows:
@@ -69,13 +66,13 @@ data
 We also provide an efficient script for calculating video durations:
 
 ```bash
-python scripts/calculate_durations.py data/video
+uv run scripts/calculate_durations.py data/video
 ```
 
 We preprocess all audio embeddings, face embeddings, and emotion labels in advance to accelerate the training process. To preprocess the data, run the following command:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/prepare_data.py --input_dir data/video --output_dir data/embedding --misc_model_dir checkpoints
+CUDA_VISIBLE_DEVICES=0 uv run scripts/prepare_data.py --input_dir data/video --output_dir data/embedding --misc_model_dir checkpoints
 ```
 
 The preprocessed embedding will be saved in the `data/embedding` directory:
@@ -98,13 +95,13 @@ data
 Run the finetuning script:
 
 ```bash
-accelerate launch --config_file configs/accelerate.yaml finetune.py --config configs/finetune.yaml --exp_name finetune 2>&1 | tee outputs_finetune.log
+uv run accelerate launch --config_file configs/accelerate.yaml finetune.py --config configs/finetune.yaml --exp_name finetune 2>&1 | tee outputs_finetune.log
 ```
 
 To inference the finetuned model, simply replace the `model_name_or_path` in `configs/inference.yaml` with the path to the finetuned model (e.g., `outputs/finetune/checkpoint-10000`).
 
 ```bash
-python inference.py --config configs/inference.yaml --input_image assets/examples/dicaprio.jpg --input_audio assets/examples/speech.wav --output_dir outputs
+uv run inference.py --config configs/inference.yaml --input_image assets/examples/dicaprio.jpg --input_audio assets/examples/speech.wav --output_dir outputs
 ```
 
 ## Acknowledgement
