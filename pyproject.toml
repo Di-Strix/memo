@@ -48,6 +48,13 @@ dependencies = [
     "xformers>=0.0.34",
 ]
 
+[dependency-groups]
+finetune = [
+    "decord>=0.6.0",
+    "deepspeed>=0.18.5",
+    "wandb>=0.24.2",
+]
+
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
