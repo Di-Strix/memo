@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import torchaudio
 from audio_separator.separator import Separator
 from einops import rearrange
-from funasr.download.download_from_hub import download_model
+from funasr.download.download_model_from_hub import download_model
 from funasr.models.emotion2vec.model import Emotion2vec
 from transformers import Wav2Vec2FeatureExtractor
 
@@ -71,7 +71,7 @@ def preprocess_audio(
             - audio_length (int): The length of the audio in frames.
     """
     # Initialize Wav2Vec model
-    audio_encoder = Wav2VecModel.from_pretrained(wav2vec_model).to(device=device)
+    audio_encoder = Wav2VecModel.from_pretrained(wav2vec_model, attn_implementation="eager").to(device=device)
     audio_encoder.feature_extractor._freeze_parameters()
 
     # Initialize Wav2Vec feature extractor

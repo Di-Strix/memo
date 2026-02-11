@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import torch
 from insightface.app import FaceAnalysis
-from moviepy.editor import AudioFileClip, VideoClip
+from moviepy import AudioFileClip, VideoClip
 from PIL import Image
 from torchvision import transforms
 
@@ -33,9 +33,9 @@ def tensor_to_video(tensor, output_video_path, input_audio_path, fps=30):
     audio_clip = AudioFileClip(input_audio_path)
     audio_duration = audio_clip.duration
     final_duration = min(video_duration, audio_duration)
-    audio_clip = audio_clip.subclip(0, final_duration)
+    audio_clip = audio_clip.subclipped(0, final_duration)
     new_video_clip = VideoClip(make_frame, duration=final_duration)
-    new_video_clip = new_video_clip.set_audio(audio_clip)
+    new_video_clip = new_video_clip.with_audio(audio_clip)
     new_video_clip.write_videofile(output_video_path, fps=fps, audio_codec="aac")
 
 
