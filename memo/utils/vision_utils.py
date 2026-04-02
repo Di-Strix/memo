@@ -38,9 +38,16 @@ def tensor_to_video(tensor, output_video_path, input_audio_path, fps=30):
     new_video_clip = new_video_clip.with_audio(audio_clip)
     new_video_clip.write_videofile(output_video_path, fps=fps, audio_codec="aac")
 
+def load_face_analysis(model: str, execution_providers: list[str] = ["CUDAExecutionProvider", "CPUExecutionProvider"]) -> FaceAnalysis:
+    face_analysis = FaceAnalysis(
+        name="",
+        root=model,
+        providers=execution_providers,
+    )
+    return face_analysis
 
 @torch.no_grad()
-def preprocess_image(face_analysis_model: str, image_path: str, image_size: int = 512):
+def preprocess_image(face_analysis_model: str | FaceAnalysis, image_path: str, image_size: int = 512):
     """
     Preprocess the image and extract face embedding.
 
@@ -63,12 +70,11 @@ def preprocess_image(face_analysis_model: str, image_path: str, image_size: int 
         ]
     )
 
-    # Initialize the FaceAnalysis model
-    face_analysis = FaceAnalysis(
-        name="",
-        root=face_analysis_model,
-        providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
-    )
+    if isinstance(face_analysis_model, FaceAnalysis):
+        face_analysis = face_analysis_model
+    else:
+        face_analysis = load_face_analysis(face_analysis_model)
+
     face_analysis.prepare(ctx_id=0, det_size=(640, 640))
 
     # Load and preprocess the image
@@ -94,7 +100,5 @@ def preprocess_image(face_analysis_model: str, image_path: str, image_size: int 
     # Convert face embedding to a PyTorch tensor
     face_emb = face_emb.reshape(1, -1)
     face_emb = torch.tensor(face_emb)
-
-    del face_analysis
 
     return pixel_values, face_emb

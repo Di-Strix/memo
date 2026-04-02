@@ -40,13 +40,32 @@ def resample_audio(input_audio_file: str, output_audio_file: str, sample_rate: i
     assert ret == 0, f"Resample audio failed! Input: {input_audio_file}, Output: {output_audio_file}"
     return output_audio_file
 
+def load_vocal_separator(model, cache_dir: str) -> Separator:
+    os.makedirs(cache_dir, exist_ok=True)
+    vocal_separator = Separator(
+        output_dir=cache_dir,
+        output_single_stem="vocals",
+        model_file_dir=os.path.dirname(model),
+    )
+    vocal_separator.load_model(os.path.basename(model))
+    assert vocal_separator.model_instance is not None, "Failed to load audio separation model."
+
+    return vocal_separator
+
+def load_wav2vec(model: str) -> tuple[Wav2VecModel, Wav2Vec2FeatureExtractor]:
+    audio_encoder = Wav2VecModel.from_pretrained(model, attn_implementation="eager")
+    audio_encoder.feature_extractor._freeze_parameters()
+
+    wav2vec_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model)
+
+    return audio_encoder, wav2vec_feature_extractor
 
 @torch.no_grad()
 def preprocess_audio(
     wav_path: str,
     fps: int,
-    wav2vec_model: str,
-    vocal_separator_model: str = None,
+    wav2vec_model: str | tuple[Wav2VecModel, Wav2Vec2FeatureExtractor],
+    vocal_separator_model: str | Separator = None,
     cache_dir: str = "",
     device: str = "cuda",
     sample_rate: int = 16000,
@@ -70,24 +89,25 @@ def preprocess_audio(
             - audio_emb (torch.Tensor): The processed audio embeddings.
             - audio_length (int): The length of the audio in frames.
     """
-    # Initialize Wav2Vec model
-    audio_encoder = Wav2VecModel.from_pretrained(wav2vec_model, attn_implementation="eager").to(device=device)
-    audio_encoder.feature_extractor._freeze_parameters()
 
-    # Initialize Wav2Vec feature extractor
-    wav2vec_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(wav2vec_model)
+    if isinstance(wav2vec_model, tuple):
+        audio_encoder = wav2vec_model[0]
+        wav2vec_feature_extractor = wav2vec_model[1]
+
+        assert isinstance(audio_encoder, Wav2VecModel)
+        assert isinstance(wav2vec_feature_extractor, Wav2Vec2FeatureExtractor)
+    else:
+        audio_encoder, wav2vec_feature_extractor = load_wav2vec(wav2vec_model)
+
+    audio_encoder.to(device)
 
     # Initialize vocal separator if provided
     vocal_separator = None
     if vocal_separator_model is not None:
-        os.makedirs(cache_dir, exist_ok=True)
-        vocal_separator = Separator(
-            output_dir=cache_dir,
-            output_single_stem="vocals",
-            model_file_dir=os.path.dirname(vocal_separator_model),
-        )
-        vocal_separator.load_model(os.path.basename(vocal_separator_model))
-        assert vocal_separator.model_instance is not None, "Failed to load audio separation model."
+        if isinstance(vocal_separator_model, Separator):
+            vocal_separator = vocal_separator_model
+        else:
+            vocal_separator = load_vocal_separator(vocal_separator_model, cache_dir)
 
     # Perform vocal separation if applicable
     if vocal_separator is not None:
@@ -139,18 +159,43 @@ def preprocess_audio(
         concatenated_tensors.append(torch.stack(vectors_to_concat, dim=0))
     audio_emb = torch.stack(concatenated_tensors, dim=0)
 
-    if vocal_separator is not None:
-        del vocal_separator
-    del audio_encoder
-
     return audio_emb, audio_length
 
 
+def load_emotion2vec(model: str) -> Emotion2vec:
+    logger.info("Downloading emotion2vec models from modelscope")
+    kwargs = download_model(model=model)
+    kwargs["tokenizer"] = None
+    kwargs["input_size"] = None
+    kwargs["frontend"] = None
+    emotion_model = Emotion2vec(**kwargs, vocab_size=-1)
+    init_param = kwargs.get("init_param", None)
+    load_emotion2vec_model(
+        model=emotion_model,
+        path=init_param,
+        ignore_init_mismatch=kwargs.get("ignore_init_mismatch", True),
+        oss_bucket=kwargs.get("oss_bucket", None),
+        scope_map=kwargs.get("scope_map", []),
+    )
+    emotion_model.eval()
+
+    return emotion_model
+
+def load_emotion_classifier(model: str) -> AudioEmotionClassifierModel:
+    classifier = AudioEmotionClassifierModel.from_pretrained(
+        model,
+        subfolder="misc/audio_emotion_classifier",
+        use_safetensors=True,
+    )
+    classifier.eval()
+
+    return classifier
+
 @torch.no_grad()
 def extract_audio_emotion_labels(
-    model: str,
+    model: str | AudioEmotionClassifierModel,
     wav_path: str,
-    emotion2vec_model: str,
+    emotion2vec_model: str | Emotion2vec,
     audio_length: int,
     sample_rate: int = 16000,
     device: str = "cuda",
@@ -170,28 +215,18 @@ def extract_audio_emotion_labels(
         torch.Tensor: Processed emotion labels with shape matching the target audio length.
     """
     # Load models
-    logger.info("Downloading emotion2vec models from modelscope")
-    kwargs = download_model(model=emotion2vec_model)
-    kwargs["tokenizer"] = None
-    kwargs["input_size"] = None
-    kwargs["frontend"] = None
-    emotion_model = Emotion2vec(**kwargs, vocab_size=-1).to(device)
-    init_param = kwargs.get("init_param", None)
-    load_emotion2vec_model(
-        model=emotion_model,
-        path=init_param,
-        ignore_init_mismatch=kwargs.get("ignore_init_mismatch", True),
-        oss_bucket=kwargs.get("oss_bucket", None),
-        scope_map=kwargs.get("scope_map", []),
-    )
-    emotion_model.eval()
+    if isinstance(model, AudioEmotionClassifierModel):
+        classifier = model
+    else:
+        classifier = load_emotion_classifier(model, device)
 
-    classifier = AudioEmotionClassifierModel.from_pretrained(
-        model,
-        subfolder="misc/audio_emotion_classifier",
-        use_safetensors=True,
-    ).to(device=device)
-    classifier.eval()
+    if isinstance(emotion2vec_model, Emotion2vec):
+        emotion_model = emotion2vec_model
+    else:
+        emotion_model = load_emotion2vec(emotion2vec_model, device)
+
+    classifier.to(device)
+    emotion_model.to(device)
 
     # Load audio
     wav, sr = torchaudio.load(wav_path)
@@ -229,9 +264,6 @@ def extract_audio_emotion_labels(
     emotion_labels = emotion_labels.unsqueeze(0).unsqueeze(0).float()
     emotion_labels = F.interpolate(emotion_labels, size=audio_length, mode="nearest").squeeze(0).squeeze(0).int()
     num_emotion_classes = classifier.num_emotion_classes
-
-    del emotion_model
-    del classifier
 
     return emotion_labels, num_emotion_classes
 
