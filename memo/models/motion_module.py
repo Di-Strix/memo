@@ -1,8 +1,6 @@
 import math
 
 import torch
-import xformers
-import xformers.ops
 from diffusers.models.attention import FeedForward
 from diffusers.models.attention_processor import Attention
 from diffusers.utils.import_utils import is_xformers_available
@@ -13,6 +11,13 @@ from memo.models.attention import zero_module
 from memo.models.attention_processor import (
     MemoryLinearAttnProcessor,
 )
+
+
+if is_xformers_available():
+    import xformers
+    import xformers.ops
+else:
+    xformers = None
 
 
 class PositionalEncoding(nn.Module):
