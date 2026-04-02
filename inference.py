@@ -1,21 +1,38 @@
 import argparse
 import logging
 import os
+from pathlib import Path
 
 import torch
+from audio_separator.separator import Separator
 from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler
 from diffusers.utils.import_utils import is_xformers_available
+from funasr.models.emotion2vec.model import Emotion2vec
+from insightface.app import FaceAnalysis
 from omegaconf import OmegaConf
 from packaging import version
 from tqdm import tqdm
-from pathlib import Path
+from transformers import Wav2Vec2FeatureExtractor
 
 from memo.models.audio_proj import AudioProjModel
+from memo.models.emotion_classifier import AudioEmotionClassifierModel
 from memo.models.image_proj import ImageProjModel
 from memo.models.unet_2d_condition import UNet2DConditionModel
 from memo.models.unet_3d import UNet3DConditionModel
+from memo.models.wav2vec import Wav2VecModel
 from memo.pipelines.video_pipeline import VideoPipeline
-from memo.utils.audio_utils import extract_audio_emotion_labels, preprocess_audio, resample_audio
+from memo.utils.audio_utils import (
+    extract_audio_emotion_labels,
+    load_emotion2vec,
+    load_emotion_classifier,
+    load_wav2vec,
+    preprocess_audio,
+    resample_audio,
+)
+from memo.utils.audio_utils import (
+    load_vocal_separator as init_vocal_separator,
+)
+from memo.utils.vision_utils import load_face_analysis as init_face_analysis
 from memo.utils.vision_utils import preprocess_image, tensor_to_video
 
 
@@ -35,46 +52,13 @@ def parse_args():
     return parser.parse_args()
 
 
-def inference(
-    input_image_path: Path,
-    input_audio_path: Path,
-    output_video_path: Path,
-    models_dir: Path,
-    overwrite_output: bool = False,
-    seed: int = 42,
-    device: torch.device | None = None,
-    weight_dtype: torch.dtype = torch.bfloat16,
-    output_resolution: int = 512,
-    fps: int = 30,
-    num_generated_frames_per_clip: int = 16,
-    num_init_past_frames: int = 16,
-    num_past_frames: int = 16,
-    inference_steps: int = 20,
-    cfg_scale: float = 3.5,
-    enable_xformers_memory_efficient_attention: bool = True,
-    model_name_or_path: Path | str = "memoavatar/memo",
-    vae_model: str = "stabilityai/sd-vae-ft-mse",
-    wav2vec_model: str = "facebook/wav2vec2-base-960h",
-    emotion2vec_model: str = "iic/emotion2vec_plus_large",
-):
-    assert input_image_path.is_file(), "input_image_path must point to a file"
-    assert input_audio_path.is_file(), "input_audio_path must point to a file"
+def load_vae(model: str) -> AutoencoderKL:
+    vae = AutoencoderKL.from_pretrained(model)
+    vae.requires_grad_(False).eval()
+    return vae
 
-    if input_audio_path.suffix != ".wav":
-        logger.warning("MEMO might not generate full-length video for non-wav audio file.")
 
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    output_dir = output_video_path.parent
-    os.makedirs(output_dir, exist_ok=True)
-    if os.path.exists(output_video_path) and not overwrite_output:
-        logger.info(f"Output file {output_video_path} already exists. Skipping inference.")
-        return
-
-    generator = torch.manual_seed(seed)
-
-    # Download face analysis and vocal separator models, if they do not exist
+def load_face_analysis(models_dir: Path) -> FaceAnalysis:
     face_analysis = models_dir / "misc" / "face_analysis"
     os.makedirs(face_analysis, exist_ok=True)
     for model in [
@@ -97,8 +81,11 @@ def inference(
             # File size check
             if os.path.getsize(model_path) < 1024 * 1024:
                 raise RuntimeError(f"{model_path} file seems incorrect (too small), delete it and retry.")
-    logger.info(f"Use face analysis models from {face_analysis}")
 
+    return init_face_analysis(str(face_analysis))
+
+
+def load_vocal_separator(models_dir: Path, cache_dir: Path) -> Separator:
     vocal_separator = models_dir / "misc" / "vocal_separator" / "Kim_Vocal_2.onnx"
     if os.path.exists(vocal_separator):
         logger.info(f"Vocal separator {vocal_separator} already exists. Skipping download.")
@@ -109,12 +96,133 @@ def inference(
             f"wget -P {os.path.dirname(vocal_separator)} https://huggingface.co/memoavatar/memo/resolve/main/misc/vocal_separator/Kim_Vocal_2.onnx"
         )
 
-    logger.info(f"Inference dtype: {weight_dtype}")
+    return init_vocal_separator(str(vocal_separator), str(cache_dir))
+
+
+class MemoInferenceModels:
+    vae: AutoencoderKL | str
+    memo: tuple[UNet2DConditionModel, UNet3DConditionModel, ImageProjModel, AudioProjModel] | str
+    emotion_classifier: AudioEmotionClassifierModel | str
+    wav2vec: tuple[Wav2VecModel, Wav2Vec2FeatureExtractor] | str
+    vocal_separator: Separator | str | None
+    emotion2vec: Emotion2vec | str
+    face_analysis: FaceAnalysis | str | None
+
+    cache_dir: Path
+    models_dir: Path
+    onnxExecutionProviders: list[str]
+
+    def __init__(
+        self,
+        memo_model: str = "memoavatar/memo",
+        vae_model: str = "stabilityai/sd-vae-ft-mse",
+        wav2vec_model: str = "facebook/wav2vec2-base-960h",
+        emotion2vec_model: str = "iic/emotion2vec_plus_large",
+        emotion_classifier: str = "memoavatar/memo",
+        vocal_separator_url: str | None = None,
+        face_analysis: str | None = None,
+        cache_dir: Path = Path("cache"),
+        models_dir: Path = Path("checkpoints"),
+        onnxExecutionProviders: list[str] = ["CUDAExecutionProvider", "CPUExecutionProvider"],
+    ):
+        self.vae = vae_model
+        self.memo = memo_model
+        self.wav2vec = wav2vec_model
+        self.emotion2vec = emotion2vec_model
+        self.emotion_classifier = emotion_classifier
+        self.vocal_separator = vocal_separator_url
+        self.face_analysis = face_analysis
+        self.cache_dir = cache_dir.absolute()
+        self.models_dir = models_dir.absolute()
+        self.onnxExecutionProviders = onnxExecutionProviders
+
+    def preload(self):
+        if isinstance(self.vae, str):
+            self.vae = load_vae(self.vae)
+        if isinstance(self.memo, str):
+            self.memo = load_memo(self.memo)
+        if isinstance(self.emotion_classifier, str):
+            self.emotion_classifier = load_emotion_classifier(self.emotion_classifier)
+        if isinstance(self.wav2vec, str):
+            self.wav2vec = load_wav2vec(self.wav2vec)
+        if isinstance(self.vocal_separator, str):
+            self.vocal_separator = init_vocal_separator(self.vocal_separator, str(self.cache_dir))
+        elif self.vocal_separator is None:
+            self.vocal_separator = load_vocal_separator(self.models_dir, self.cache_dir)
+        if isinstance(self.emotion2vec, str):
+            self.emotion2vec = load_emotion2vec(self.emotion2vec)
+        if isinstance(self.face_analysis, str):
+            self.face_analysis = init_face_analysis(
+                self.face_analysis, execution_providers=self.onnxExecutionProviders
+            )
+        elif self.face_analysis is None:
+            self.face_analysis = load_face_analysis(self.models_dir)
+
+
+def load_memo(model: str) -> tuple[UNet2DConditionModel, UNet3DConditionModel, ImageProjModel, AudioProjModel]:
+    reference_net = UNet2DConditionModel.from_pretrained(model, subfolder="reference_net", use_safetensors=True)
+    diffusion_net = UNet3DConditionModel.from_pretrained(model, subfolder="diffusion_net", use_safetensors=True)
+    image_proj = ImageProjModel.from_pretrained(model, subfolder="image_proj", use_safetensors=True)
+    audio_proj = AudioProjModel.from_pretrained(model, subfolder="audio_proj", use_safetensors=True)
+
+    reference_net.requires_grad_(False).eval()
+    diffusion_net.requires_grad_(False).eval()
+    image_proj.requires_grad_(False).eval()
+    audio_proj.requires_grad_(False).eval()
+
+    return reference_net, diffusion_net, image_proj, audio_proj
+
+
+def inference(
+    input_image_path: Path,
+    input_audio_path: Path,
+    output_video_path: Path,
+    overwrite_output: bool = False,
+    seed: int = 42,
+    device: torch.device | None = None,
+    weight_dtype: torch.dtype = torch.bfloat16,
+    output_resolution: int = 512,
+    fps: int = 30,
+    num_generated_frames_per_clip: int = 16,
+    num_init_past_frames: int = 16,
+    num_past_frames: int = 16,
+    inference_steps: int = 20,
+    cfg_scale: float = 3.5,
+    enable_xformers_memory_efficient_attention: bool = True,
+    models: MemoInferenceModels | None = None,
+):
+    assert input_image_path.is_file(), "input_image_path must point to a file"
+    assert input_audio_path.is_file(), "input_audio_path must point to a file"
+
+    if input_audio_path.suffix != ".wav":
+        logger.warning("MEMO might not generate full-length video for non-wav audio file.")
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    output_dir = output_video_path.parent
+    os.makedirs(output_dir, exist_ok=True)
+    if os.path.exists(output_video_path) and not overwrite_output:
+        logger.info(f"Output file {output_video_path} already exists. Skipping inference.")
+        return
+
+    if models is None:
+        models = MemoInferenceModels()
+
+    logger.info("Loading models")
+    models.preload()
+
+    assert models.vocal_separator is not None
+    assert models.face_analysis is not None
+    assert isinstance(models.memo, tuple)
+    assert not isinstance(models.vae, str)
+
+    generator = torch.manual_seed(seed)
 
     logger.info(f"Processing image {input_image_path}")
     img_size = (output_resolution, output_resolution)
     pixel_values, face_emb = preprocess_image(
-        face_analysis_model=str(face_analysis),
+        face_analysis_model=models.face_analysis,
         image_path=str(input_image_path),
         image_size=output_resolution,
     )
@@ -132,37 +240,26 @@ def inference(
         wav_path=str(input_audio_path),
         num_generated_frames_per_clip=num_generated_frames_per_clip,
         fps=fps,
-        wav2vec_model=wav2vec_model,
-        vocal_separator_model=str(vocal_separator),
+        wav2vec_model=models.wav2vec,
+        vocal_separator_model=models.vocal_separator,
         cache_dir=str(cache_dir),
         device=device,
     )
 
     logger.info("Processing audio emotion")
     audio_emotion, num_emotion_classes = extract_audio_emotion_labels(
-        model="memoavatar/memo",
+        model=models.emotion_classifier,
         wav_path=str(input_audio_path),
-        emotion2vec_model=emotion2vec_model,
+        emotion2vec_model=models.emotion2vec,
         audio_length=audio_length,
         device=device,
     )
 
-    logger.info("Loading models")
-    vae = AutoencoderKL.from_pretrained(vae_model).to(device=device, dtype=weight_dtype)
-    reference_net = UNet2DConditionModel.from_pretrained(
-        model_name_or_path, subfolder="reference_net", use_safetensors=True
-    )
-    diffusion_net = UNet3DConditionModel.from_pretrained(
-        model_name_or_path, subfolder="diffusion_net", use_safetensors=True
-    )
-    image_proj = ImageProjModel.from_pretrained(model_name_or_path, subfolder="image_proj", use_safetensors=True)
-    audio_proj = AudioProjModel.from_pretrained(model_name_or_path, subfolder="audio_proj", use_safetensors=True)
-
-    vae.requires_grad_(False).eval()
-    reference_net.requires_grad_(False).eval()
-    diffusion_net.requires_grad_(False).eval()
-    image_proj.requires_grad_(False).eval()
-    audio_proj.requires_grad_(False).eval()
+    reference_net: UNet2DConditionModel
+    diffusion_net: UNet3DConditionModel
+    image_proj: ImageProjModel
+    audio_proj: AudioProjModel
+    reference_net, diffusion_net, image_proj, audio_proj = models.memo
 
     # Enable memory-efficient attention for xFormers
     if enable_xformers_memory_efficient_attention:
@@ -182,7 +279,7 @@ def inference(
     # Create inference pipeline
     noise_scheduler = FlowMatchEulerDiscreteScheduler()
     pipeline = VideoPipeline(
-        vae=vae,
+        vae=models.vae,
         reference_net=reference_net,
         diffusion_net=diffusion_net,
         scheduler=noise_scheduler,
@@ -242,7 +339,7 @@ def inference(
     video_frames = video_frames.squeeze(0)
     video_frames = video_frames[:, :audio_length]
 
-    tensor_to_video(video_frames, output_video_path, input_audio_path, fps=config.fps)
+    tensor_to_video(video_frames, output_video_path, input_audio_path, fps=fps)
 
 
 if __name__ == "__main__":
@@ -264,7 +361,6 @@ if __name__ == "__main__":
         input_image_path=args.input_image.absolute(),
         input_audio_path=args.input_audio.absolute(),
         output_video_path=args.output_path.absolute(),
-        models_dir=Path("checkpoints").absolute(),
         overwrite_output=False,
         seed=args.seed,
         weight_dtype=weight_dtype,
@@ -276,8 +372,11 @@ if __name__ == "__main__":
         inference_steps=config.inference_steps,
         cfg_scale=config.cfg_scale,
         enable_xformers_memory_efficient_attention=config.enable_xformers_memory_efficient_attention,
-        model_name_or_path=config.model_name_or_path,
-        vae_model=config.vae,
-        wav2vec_model=config.wav2vec,
-        emotion2vec_model=config.emotion2vec,
+        models=MemoInferenceModels(
+            memo_model=config.model_name_or_path,
+            vae_model=config.vae,
+            wav2vec_model=config.wav2vec,
+            emotion2vec_model=config.emotion2vec,
+            models_dir=Path("checkpoints").absolute(),
+        ),
     )
