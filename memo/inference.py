@@ -44,7 +44,7 @@ def load_vae(model: str) -> AutoencoderKL:
     return vae
 
 
-def load_face_analysis(models_dir: Path) -> FaceAnalysis:
+def download_face_analysis(models_dir: Path) -> Path:
     face_analysis = models_dir / "misc" / "face_analysis"
     os.makedirs(face_analysis, exist_ok=True)
     for model in [
@@ -68,10 +68,10 @@ def load_face_analysis(models_dir: Path) -> FaceAnalysis:
             if os.path.getsize(model_path) < 1024 * 1024:
                 raise RuntimeError(f"{model_path} file seems incorrect (too small), delete it and retry.")
 
-    return init_face_analysis(str(face_analysis))
+    return face_analysis
 
 
-def load_vocal_separator(models_dir: Path, cache_dir: Path) -> Separator:
+def download_vocal_separator(models_dir: Path) -> Path:
     vocal_separator = models_dir / "misc" / "vocal_separator" / "Kim_Vocal_2.onnx"
     if os.path.exists(vocal_separator):
         logger.info(f"Vocal separator {vocal_separator} already exists. Skipping download.")
@@ -82,7 +82,7 @@ def load_vocal_separator(models_dir: Path, cache_dir: Path) -> Separator:
             f"wget -P {os.path.dirname(vocal_separator)} https://huggingface.co/memoavatar/memo/resolve/main/misc/vocal_separator/Kim_Vocal_2.onnx"
         )
 
-    return init_vocal_separator(str(vocal_separator), str(cache_dir))
+    return vocal_separator
 
 
 class MemoInferenceModels:
@@ -134,7 +134,9 @@ class MemoInferenceModels:
         if isinstance(self.vocal_separator, str):
             self.vocal_separator = init_vocal_separator(self.vocal_separator, str(self.cache_dir))
         elif self.vocal_separator is None:
-            self.vocal_separator = load_vocal_separator(self.models_dir, self.cache_dir)
+            self.vocal_separator = init_vocal_separator(
+                str(download_vocal_separator(self.models_dir)), str(self.cache_dir)
+            )
         if isinstance(self.emotion2vec, str):
             self.emotion2vec = load_emotion2vec(self.emotion2vec)
         if isinstance(self.face_analysis, str):
@@ -142,7 +144,9 @@ class MemoInferenceModels:
                 self.face_analysis, execution_providers=self.onnxExecutionProviders
             )
         elif self.face_analysis is None:
-            self.face_analysis = load_face_analysis(self.models_dir)
+            self.face_analysis = init_face_analysis(
+                str(download_face_analysis(self.models_dir)), execution_providers=self.onnxExecutionProviders
+            )
 
 
 def load_memo(model: str) -> tuple[UNet2DConditionModel, UNet3DConditionModel, ImageProjModel, AudioProjModel]:
