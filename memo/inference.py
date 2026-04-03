@@ -1,6 +1,7 @@
 import logging
 import os
 from pathlib import Path
+from enum import Enum
 
 import torch
 from audio_separator.separator import Separator
@@ -158,6 +159,19 @@ def load_memo(model: str) -> tuple[UNet2DConditionModel, UNet3DConditionModel, I
     return reference_net, diffusion_net, image_proj, audio_proj
 
 
+class EmotionCode(Enum):
+    # https://modelscope.cn/models/iic/emotion2vec_plus_large/summary
+    ANGRY = 0
+    DISGUSTED = 1
+    FEARFUL = 2
+    HAPPY = 3
+    NEUTRAL = 4
+    OTHER = 5
+    SAD = 6
+    SURPRISED = 7
+    UNKNOWN = 8
+
+
 def inference(
     input_image_path: Path,
     input_audio_path: Path,
@@ -175,6 +189,7 @@ def inference(
     cfg_scale: float = 3.5,
     enable_xformers_memory_efficient_attention: bool = True,
     models: MemoInferenceModels | None = None,
+    force_emotion: EmotionCode | None = None,
 ):
     assert input_image_path.is_file(), "input_image_path must point to a file"
     assert input_audio_path.is_file(), "input_audio_path must point to a file"
@@ -231,14 +246,19 @@ def inference(
         device=device,
     )
 
-    logger.info("Processing audio emotion")
-    audio_emotion, num_emotion_classes = extract_audio_emotion_labels(
-        model=models.emotion_classifier,
-        wav_path=str(input_audio_path),
-        emotion2vec_model=models.emotion2vec,
-        audio_length=audio_length,
-        device=device,
-    )
+    if force_emotion is None:
+        logger.info("Processing audio emotion")
+        audio_emotion, num_emotion_classes = extract_audio_emotion_labels(
+            model=models.emotion_classifier,
+            wav_path=str(input_audio_path),
+            emotion2vec_model=models.emotion2vec,
+            audio_length=audio_length,
+            device=device,
+        )
+    else:
+        logger.info(f"Forcing emotion: {force_emotion}")
+        num_emotion_classes = 8
+        audio_emotion = torch.full((audio_length,), force_emotion, dtype=torch.int32)
 
     reference_net: UNet2DConditionModel
     diffusion_net: UNet3DConditionModel
