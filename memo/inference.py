@@ -294,11 +294,12 @@ def inference(
         scheduler=noise_scheduler,
         image_proj=image_proj,
     )
+    pipeline.set_progress_bar_config(position=1, leave=False)
     pipeline.to(device=device, dtype=weight_dtype)
 
     video_frames = []
     num_clips = audio_emb.shape[0] // num_generated_frames_per_clip
-    for t in tqdm(range(num_clips), desc="Generating video clips"):
+    for t in tqdm(range(num_clips), desc="Generating video clips", position=0):
         if len(video_frames) == 0:
             # Initialize the first past frames with reference image
             past_frames = pixel_values.repeat(num_init_past_frames, 1, 1, 1)
