@@ -262,7 +262,7 @@ def inference(
     else:
         logger.info(f"Forcing emotion: {force_emotion}")
         num_emotion_classes = 8
-        audio_emotion = torch.full((audio_length,), force_emotion, dtype=torch.int32)
+        audio_emotion = torch.full((audio_length,), force_emotion.value, dtype=torch.int32)
 
     reference_net: UNet2DConditionModel
     diffusion_net: UNet3DConditionModel
